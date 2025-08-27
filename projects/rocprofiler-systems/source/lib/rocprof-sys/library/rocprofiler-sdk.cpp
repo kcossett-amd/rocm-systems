@@ -904,6 +904,122 @@ get_kernel_dispatch_timestamps()
 }
 
 #if(ROCPROFILER_VERSION >= 600)
+
+//Wrapper around rocprofiler_iterate_callback_tracing_kind_operation_args
+// Expands flag bitmap
+void ompt_populate_tracing_kind_operation_args(const rocprofiler_callback_tracing_record_t& record, callback_arg_array_t& args)
+{
+    auto ompt_operation_type = static_cast<rocprofiler_ompt_operation_t>(record.operation);
+    rocprofiler_iterate_callback_tracing_kind_operation_args(
+        record, save_args, (record.phase == ROCPROFILER_CALLBACK_PHASE_ENTER) ? 1 : 2,
+        &args);
+
+    // Do not delete flag arg
+    auto extract_flags = [&args]() {
+        for (auto it = args.begin(); it != args.end(); ++it)
+        {
+            if (it->first == "flags")
+            {
+                return std::stoi(it->second);
+            }
+        }
+        return 0;
+    };
+    
+    // Mirrors LLVM's flag processing pattern (callback.h)
+    // for consistent interpretation and args population
+    switch(ompt_operation_type)
+    {
+        case ROCPROFILER_OMPT_ID_parallel_begin: // ompt_parallel_flag_t
+        case ROCPROFILER_OMPT_ID_parallel_end: // ompt_parallel_flag_t
+        {
+            int flags = extract_flags();
+            if (flags & ompt_parallel_invoker_program)
+                args.push_back(std::make_pair("invoker", "program"));
+            else // Must be ompt_ptarallel_invoker_runtime
+                args.push_back(std::make_pair("invoker", "runtime"));
+
+            if (flags & ompt_parallel_league)
+                args.push_back(std::make_pair("event", "league"));
+            else // Must be ompt_parallel_team
+                args.push_back(std::make_pair("event", "teams"));
+            break;
+        }
+        case ROCPROFILER_OMPT_ID_task_create: // ompt_task_flag_t
+        {
+            // In LLVM, "flags" is referred to as "type"
+            int flags = extract_flags();
+            if (flags & ompt_task_initial)
+                args.push_back(std::make_pair("task_classification", "initial"));
+            else if (flags & ompt_task_implicit)
+                args.push_back(std::make_pair("task_classification", "implicit"));
+            else if (flags & ompt_task_explicit)
+                args.push_back(std::make_pair("task_classification", "explicit"));
+            else // Must be ompt_task_target
+                args.push_back(std::make_pair("task_classification", "target"));
+            
+            // It is possible that no property bits are set 
+            std::string task_properties = "";
+            if (flags & ompt_task_undeferred)
+                task_properties += "underferred|";
+            if (flags & ompt_task_untied)
+                task_properties += "untied|";
+            if (flags & ompt_task_final)
+                task_properties += "final|";
+            if (flags & ompt_task_mergeable)
+                task_properties += "mergeable|";
+            if (flags & ompt_task_merged)
+                task_properties += "merged|";
+                
+            if (task_properties.empty())
+                task_properties += "null"; // Ensure null conforms with other things
+            else // Pop trailing "|"
+                task_properties.pop_back();
+
+            args.push_back(std::make_pair("task_properties", task_properties));
+
+            break;
+        }
+        case ROCPROFILER_OMPT_ID_implicit_task: // initial (1) or implicit (2)
+        {
+            // LLVM implementation uses first two ompt_task_flag_t values 
+            int flags = extract_flags();
+            if (flags == ompt_task_initial) // initial
+                args.push_back(std::make_pair("task_kind", "initial"));
+            else // ompt_task_implicit
+                args.push_back(std::make_pair("task_kind", "implicit"));
+            break;
+        }
+        case ROCPROFILER_OMPT_ID_cancel: // ompt_cancel_flag_t
+        {
+            int flags = extract_flags();
+            // Construct type
+            if (flags & ompt_cancel_parallel)
+                args.push_back(std::make_pair("construct", "parallel"));
+            else if (flags & ompt_cancel_sections)
+                args.push_back(std::make_pair("construct", "sections"));
+            else if (flags & ompt_cancel_loop)
+                args.push_back(std::make_pair("construct", "loop"));
+            else if (flags & ompt_cancel_taskgroup)
+                args.push_back(std::make_pair("construct", "taskgroup"));
+
+            // Cancel states 
+            if (flags & ompt_cancel_activated)
+                args.push_back(std::make_pair("state", "activated"));
+            else if (flags & ompt_cancel_detected)
+                args.push_back(std::make_pair("state", "detected"));
+            else if (flags & ompt_cancel_discarded_task)
+                args.push_back(std::make_pair("state", "discarded_task"));
+
+            break;
+        }
+        default: break;
+    }
+}
+
+#endif
+
+#if(ROCPROFILER_VERSION >= 600)
 // To handle events without finalization, perfetto push must occur in start
 // Allows capture of worker thread implicit and sync tasks
 void
@@ -943,11 +1059,8 @@ ompt_tracing_callback_start(rocprofiler_callback_tracing_record_t record,
     {
         auto args = callback_arg_array_t{};
         if(config::get_perfetto_annotations())
-        {
-            rocprofiler_iterate_callback_tracing_kind_operation_args(record, save_args, 1,
-                                                                     &args);
-        }
-
+            ompt_populate_tracing_kind_operation_args(record, args);
+        
         uint64_t _beg_ts   = ts;
         auto     stream_id = stream_id_top();
 
@@ -998,10 +1111,8 @@ ompt_tracing_callback_stop(
     {
         auto args = callback_arg_array_t{};
         if(config::get_perfetto_annotations())
-        {
-            rocprofiler_iterate_callback_tracing_kind_operation_args(record, save_args, 2,
-                                                                     &args);
-        }
+            ompt_populate_tracing_kind_operation_args(record, args);
+        
         uint64_t _end_ts = ts;
         tracing::pop_perfetto_ts(
             category::rocm_ompt_api{}, _name.data(), _end_ts,
