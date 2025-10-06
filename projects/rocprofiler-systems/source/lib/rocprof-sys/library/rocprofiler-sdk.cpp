@@ -904,6 +904,62 @@ get_kernel_dispatch_timestamps()
 }
 
 #if(ROCPROFILER_VERSION >= 600)
+
+void
+ompt_argument_name_check(rocprofiler_callback_tracing_record_t& record)
+{   
+    static std::set<rocprofiler_ompt_operation_t> ompt_types_to_check {
+        ROCPROFILER_OMPT_ID_target_emi,
+        ROCPROFILER_OMPT_ID_mutex_released,
+        ROCPROFILER_OMPT_ID_lock_init,
+        ROCPROFILER_OMPT_ID_lock_destroy,
+        ROCPROFILER_OMPT_ID_mutex_acquire,
+        ROCPROFILER_OMPT_ID_mutex_acquired,
+    };
+    
+    auto ompt_op = static_cast<rocprofiler_ompt_operation_t>(record.operation);
+    if (ompt_types_to_check.find(ompt_op) == ompt_types_to_check.end()) return;
+
+    std::vector<std::pair<std::string, std::string>> args;
+    rocprofiler_iterate_callback_tracing_kind_operation_args(record, save_args, 1, &args);
+
+    std::string cb_name;
+    // Convert enum to string representation
+    switch(ompt_op) {
+        case ROCPROFILER_OMPT_ID_target_emi:
+            cb_name = "target_emi";
+            break;
+        case ROCPROFILER_OMPT_ID_mutex_released:
+            cb_name = "mutex_released";
+            break;
+        case ROCPROFILER_OMPT_ID_lock_init:
+            cb_name = "lock_init";
+            break;
+        case ROCPROFILER_OMPT_ID_lock_destroy:
+            cb_name = "lock_destroy";
+            break;
+        case ROCPROFILER_OMPT_ID_mutex_acquire:
+            cb_name = "mutex_acquire";
+            break;
+        case ROCPROFILER_OMPT_ID_mutex_acquired:
+            cb_name = "mutex_acquired";
+            break;
+        default:
+            cb_name = "unknown";
+            break;
+    }
+
+    for (const auto& [arg, value] : args)
+    {
+        if (arg == "kind")
+        {
+            std::cout << "[ROCPROFILER-SDK] Callback: " << cb_name << " has kind name as: " << value  << " (should be a name, not a number)" << std::endl << std::flush;
+            break;
+        }
+    }
+}
+
+
 // To handle events without finalization, perfetto push must occur in start
 // Allows capture of worker thread implicit and sync tasks
 void
@@ -911,6 +967,7 @@ ompt_tracing_callback_start(rocprofiler_callback_tracing_record_t record,
                             rocprofiler_user_data_t* /*user_data*/,
                             rocprofiler_timestamp_t ts)
 {
+    ompt_argument_name_check(record);
     static bool is_first_implicit_call = true;
 
     // Ignore first ompt_implicit_call as this is created after runtime initialization but
@@ -975,6 +1032,7 @@ ompt_tracing_callback_stop(
     rocprofiler_timestamp_t               ts,
     std::optional<std::vector<tim::unwind::processed_entry>>& _bt_data)
 {
+    ompt_argument_name_check(record);
     std::string_view _name =
         tool_data->callback_tracing_info.at(record.kind, record.operation);
 
