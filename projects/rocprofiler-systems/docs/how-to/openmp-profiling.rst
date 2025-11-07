@@ -147,7 +147,7 @@ The image below shows the group of traces that correspond to the execution of th
 
 .. image:: ../data/openmp-profiling/perfetto-jacobi-laplacian-traces-view.png
     :alt: Traces corresponding to the Laplacian OpenMP pragma
-    :width: 800
+    :width: 1400
 
 The general sequence of events for this code block is as follows:
     1. An ``omp_target_emi`` callback is generated and spans the entire duration of the OpenMP ``target teams`` construct.
@@ -196,3 +196,4 @@ When profiling finishes, a ``.proto`` file will be generated in the output direc
   rocprofsys-jacobi.inst-output/<timestamp>/
 
 This ``.proto`` file can be viewed in the same manner that was described in the previous section.
+
