@@ -34,6 +34,7 @@ Provides classes for running tests with:
 from __future__ import annotations
 
 import os
+import shutil
 import subprocess
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
@@ -41,6 +42,24 @@ from pathlib import Path
 from typing import Optional
 
 from .config import RocprofsysConfig
+
+
+def _safe_remove_file(filepath: Path) -> None:
+    """Safely remove a file, ignoring errors."""
+    try:
+        if filepath.is_file():
+            filepath.unlink()
+    except OSError:
+        pass
+
+
+def _safe_remove_directory(dirpath: Path) -> None:
+    """Safely remove a directory recursively, ignoring errors."""
+    try:
+        if dirpath.is_dir():
+            shutil.rmtree(dirpath)
+    except OSError:
+        pass
 
 
 @dataclass
@@ -55,6 +74,7 @@ class TestResult:
         command: The command that was executed
         env: Environment variables used
         duration: Execution time in seconds (if measured)
+        _instrumented_files: List of instrumented binary files created
     """
 
     returncode: int
@@ -64,6 +84,7 @@ class TestResult:
     command: list[str]
     env: dict[str, str]
     duration: Optional[float] = None
+    _instrumented_files: list[Path] = field(default_factory=list)
 
     @property
     def success(self) -> bool:
@@ -100,6 +121,14 @@ class TestResult:
             self.output_dir.glob("*.txt")
         )
 
+    @property
+    def causal_files(self) -> list[Path]:
+        """List of causal profiling output files."""
+        causal_dir = self.output_dir / "causal"
+        if causal_dir.exists():
+            return list(causal_dir.glob("*"))
+        return []
+
     def get_output_file(self, pattern: str) -> Optional[Path]:
         """Get an output file matching the given pattern.
 
@@ -127,6 +156,39 @@ class TestResult:
         path = self.output_dir / filename
         assert path.exists(), f"Expected output file not found: {path}"
         return path
+
+    def cleanup(self, keep_on_failure: bool = True) -> None:
+        """Clean up test output files.
+
+        Args:
+            keep_on_failure: If True, keep files when test failed for debugging
+        """
+        if os.environ.get("ROCPROFSYS_KEEP_TEST_OUTPUT", "0") == "1":
+            return
+
+        if keep_on_failure and not self.success:
+            return
+
+        # Clean up instrumented binaries
+        for inst_file in self._instrumented_files:
+            _safe_remove_file(inst_file)
+
+        # Clean up output directory
+        if self.output_dir.exists():
+            _safe_remove_directory(self.output_dir)
+
+    def cleanup_instrumented_binaries(self) -> None:
+        """Clean up only the instrumented binary files."""
+        if os.environ.get("ROCPROFSYS_KEEP_TEST_OUTPUT", "0") == "1":
+            return
+
+        for inst_file in self._instrumented_files:
+            _safe_remove_file(inst_file)
+
+        # Also clean any .inst files in output directory
+        if self.output_dir.exists():
+            for inst_file in self.output_dir.glob("*.inst"):
+                _safe_remove_file(inst_file)
 
 
 class BaseRunner(ABC):
@@ -306,6 +368,7 @@ class BinaryRewriteRunner(BaseRunner):
         target: str,
         output_dir: Path,
         rewrite_args: Optional[list[str]] = None,
+        cleanup_on_success: bool = False,
         **kwargs,
     ):
         """Initialize binary rewrite runner.
@@ -315,11 +378,16 @@ class BinaryRewriteRunner(BaseRunner):
             target: Name of target executable
             output_dir: Directory for output files
             rewrite_args: Arguments for rocprof-sys-instrument
+            cleanup_on_success: Whether to clean up instrumented binary immediately
+                after successful run. Default is False - let the test_output_dir
+                fixture handle cleanup after validation completes.
             **kwargs: Additional arguments passed to BaseRunner
         """
         super().__init__(config, target, output_dir, **kwargs)
         self.rewrite_args = rewrite_args or []
         self.instrumented_exe = output_dir / f"{target}.inst"
+        self.cleanup_on_success = cleanup_on_success
+        self._instrumented_files: list[Path] = []
 
     def rewrite(self) -> TestResult:
         """Perform binary rewrite phase.
@@ -349,6 +417,10 @@ class BinaryRewriteRunner(BaseRunner):
             cwd=self.config.build_dir,
         )
 
+        # Track instrumented files for cleanup
+        if self.instrumented_exe.exists():
+            self._instrumented_files.append(self.instrumented_exe)
+
         return TestResult(
             returncode=result.returncode,
             stdout=result.stdout,
@@ -356,6 +428,7 @@ class BinaryRewriteRunner(BaseRunner):
             output_dir=self.output_dir,
             command=command,
             env=self.env,
+            _instrumented_files=self._instrumented_files.copy(),
         )
 
     def build_command(self) -> list[str]:
@@ -370,6 +443,12 @@ class BinaryRewriteRunner(BaseRunner):
 
         Returns:
             TestResult from run phase (rewrite must succeed first)
+
+        Note:
+            By default, cleanup is handled by the test_output_dir fixture
+            AFTER the test completes (including validation). Set cleanup_on_success=True
+            only if you want immediate cleanup of .inst files (validation files are
+            preserved regardless).
         """
         # First, perform rewrite
         rewrite_result = self.rewrite()
@@ -377,7 +456,32 @@ class BinaryRewriteRunner(BaseRunner):
             return rewrite_result
 
         # Then run the instrumented binary
-        return super().run()
+        run_result = super().run()
+
+        # Add instrumented files to result for cleanup (used by fixtures)
+        run_result._instrumented_files = self._instrumented_files.copy()
+
+        # Optional immediate cleanup of .inst files only (NOT validation files)
+        # Default is False - let test_output_dir fixture handle all cleanup
+        # after validation completes
+        if self.cleanup_on_success and run_result.success:
+            if os.environ.get("ROCPROFSYS_KEEP_TEST_OUTPUT", "0") != "1":
+                run_result.cleanup_instrumented_binaries()
+
+        return run_result
+
+    def cleanup(self) -> None:
+        """Clean up instrumented binary files."""
+        if os.environ.get("ROCPROFSYS_KEEP_TEST_OUTPUT", "0") == "1":
+            return
+
+        for inst_file in self._instrumented_files:
+            _safe_remove_file(inst_file)
+
+        # Also clean any .inst files in output directory
+        if self.output_dir.exists():
+            for inst_file in self.output_dir.glob("*.inst"):
+                _safe_remove_file(inst_file)
 
 
 class RuntimeInstrumentRunner(BaseRunner):

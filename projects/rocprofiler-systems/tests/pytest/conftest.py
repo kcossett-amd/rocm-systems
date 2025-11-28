@@ -180,6 +180,15 @@ def test_output_dir(
 
     Creates a directory named after the test and cleans up on success.
     On failure, the directory is preserved for debugging.
+
+    Cleanup Order:
+        1. Test setup: Directory is created
+        2. Test body: Runner executes, output files are written
+        3. Test body: Validation happens on output files
+        4. Test body: Assertions complete
+        5. Test teardown: This fixture cleans up the directory (AFTER yield)
+
+    This ensures validation always has access to output files.
     """
     test_name = request.node.name
     safe_name = "".join(c if c.isalnum() or c in "-_" else "_" for c in test_name)
@@ -189,8 +198,9 @@ def test_output_dir(
         shutil.rmtree(output_dir)
     output_dir.mkdir(parents=True)
 
-    yield output_dir
+    yield output_dir  # Test body executes here (including validation)
 
+    # === CLEANUP PHASE (runs AFTER test body completes) ===
     # Cleanup on success unless ROCPROFSYS_KEEP_TEST_OUTPUT is set
     keep_output = os.environ.get("ROCPROFSYS_KEEP_TEST_OUTPUT", "0") == "1"
     test_failed = hasattr(request.node, "rep_call") and request.node.rep_call.failed
@@ -224,47 +234,237 @@ def rocpd_env(transpose_env: dict[str, str], gpu_info: GPUInfo) -> dict[str, str
     return env
 
 
+@pytest.fixture
+def flat_env(base_env: dict[str, str]) -> dict[str, str]:
+    """Environment variables for flat profile tests."""
+    return {
+        "ROCPROFSYS_TRACE": "ON",
+        "ROCPROFSYS_PROFILE": "ON",
+        "ROCPROFSYS_TIME_OUTPUT": "OFF",
+        "ROCPROFSYS_COUT_OUTPUT": "ON",
+        "ROCPROFSYS_FLAT_PROFILE": "ON",
+        "ROCPROFSYS_TIMELINE_PROFILE": "OFF",
+        "ROCPROFSYS_COLLAPSE_PROCESSES": "ON",
+        "ROCPROFSYS_COLLAPSE_THREADS": "ON",
+        "ROCPROFSYS_SAMPLING_FREQ": "50",
+        "ROCPROFSYS_TIMEMORY_COMPONENTS": "wall_clock,trip_count",
+        "OMP_PROC_BIND": "spread",
+        "OMP_PLACES": "threads",
+        "OMP_NUM_THREADS": "2",
+        "LD_LIBRARY_PATH": base_env.get("LD_LIBRARY_PATH", ""),
+    }
+
+
+@pytest.fixture
+def perfetto_env(base_env: dict[str, str]) -> dict[str, str]:
+    """Environment variables for perfetto-only tests."""
+    return {
+        "ROCPROFSYS_TRACE": "ON",
+        "ROCPROFSYS_PROFILE": "OFF",
+        "ROCPROFSYS_USE_SAMPLING": "ON",
+        "ROCPROFSYS_USE_PROCESS_SAMPLING": "ON",
+        "ROCPROFSYS_TIME_OUTPUT": "OFF",
+        "ROCPROFSYS_PERFETTO_BACKEND": "inprocess",
+        "ROCPROFSYS_PERFETTO_FILL_POLICY": "ring_buffer",
+        "OMP_PROC_BIND": "spread",
+        "OMP_PLACES": "threads",
+        "OMP_NUM_THREADS": "2",
+        "LD_LIBRARY_PATH": base_env.get("LD_LIBRARY_PATH", ""),
+    }
+
+
+@pytest.fixture
+def timemory_env(base_env: dict[str, str]) -> dict[str, str]:
+    """Environment variables for timemory-only tests."""
+    return {
+        "ROCPROFSYS_TRACE": "OFF",
+        "ROCPROFSYS_PROFILE": "ON",
+        "ROCPROFSYS_USE_SAMPLING": "ON",
+        "ROCPROFSYS_USE_PROCESS_SAMPLING": "ON",
+        "ROCPROFSYS_TIME_OUTPUT": "OFF",
+        "ROCPROFSYS_TIMEMORY_COMPONENTS": "wall_clock,trip_count,peak_rss",
+        "OMP_PROC_BIND": "spread",
+        "OMP_PLACES": "threads",
+        "OMP_NUM_THREADS": "2",
+        "LD_LIBRARY_PATH": base_env.get("LD_LIBRARY_PATH", ""),
+    }
+
+
 # ============================================================================
 # Cleanup Fixtures
 # ============================================================================
 
 
+def _cleanup_temp_patterns() -> list[str]:
+    """Return list of temp file patterns to clean up."""
+    return [
+        # rocprofiler-systems temp files
+        "/tmp/buffered_storage*.bin",
+        "/tmp/metadata*.json",
+        "/tmp/rocprof-sys-*.tmp",
+        "/tmp/rocprofsys-*.tmp",
+        # Perfetto temp files
+        "/tmp/perfetto-*.proto",
+        "/tmp/perfetto_trace*.proto",
+        # HSA/ROCm temp files
+        "/tmp/hsa-*.tmp",
+        "/tmp/rocm-*.tmp",
+        "/tmp/hip-*.tmp",
+        # Instrumented binaries that might be left over
+        "/tmp/*.inst",
+        # Causal profiling temp files
+        "/tmp/causal-*.json",
+        "/tmp/experiments-*.coz",
+        # Core dumps (if any)
+        "/tmp/core.*",
+    ]
+
+
+def _cleanup_directory_patterns(build_dir: Path) -> list[Path]:
+    """Return list of directories to check for cleanup."""
+    return [
+        build_dir / "rocprof-sys-pytest-output",
+        build_dir / "rocprof-sys-tests-output",
+        build_dir / "rocprof-sys-tests-config",
+    ]
+
+
+def _safe_remove_file(filepath: Path) -> None:
+    """Safely remove a file, ignoring errors."""
+    try:
+        if filepath.is_file():
+            filepath.unlink()
+    except OSError:
+        pass
+
+
+def _safe_remove_directory(dirpath: Path, remove_if_empty: bool = True) -> None:
+    """Safely remove a directory.
+
+    Args:
+        dirpath: Path to directory
+        remove_if_empty: If True, only remove if empty. If False, remove recursively.
+    """
+    try:
+        if not dirpath.exists():
+            return
+        if remove_if_empty:
+            if dirpath.is_dir() and not any(dirpath.iterdir()):
+                dirpath.rmdir()
+        else:
+            if dirpath.is_dir():
+                shutil.rmtree(dirpath)
+    except OSError:
+        pass
+
+
 @pytest.fixture(scope="session", autouse=True)
 def cleanup_temp_files(rocprof_config: RocprofsysConfig):
-    """Session-scoped cleanup fixture that runs after all tests complete.
+    """Session-scoped cleanup fixture that runs AFTER ALL tests complete.
+
+    Execution Order:
+        1. Session starts
+        2. All test modules run (with their validations)
+        3. Session ends
+        4. This cleanup runs (after yield)
 
     Cleans up:
-    - Temporary buffered storage files (/tmp/buffered_storage*.bin)
-    - Temporary metadata files (/tmp/metadata*.json)
+    - Temporary buffered storage files
+    - Temporary metadata files
+    - Perfetto temp files
+    - HSA/ROCm temp files
+    - Instrumented binaries
+    - Causal profiling temp files
     - Empty pytest output directories
+    - Test config directories
     """
-    yield
+    yield  # All tests run here
 
     if os.environ.get("ROCPROFSYS_KEEP_TEST_OUTPUT", "0") == "1":
         return
 
     import glob
 
+    # Clean up temp files matching patterns
+    for pattern in _cleanup_temp_patterns():
+        for filepath in glob.glob(pattern):
+            _safe_remove_file(Path(filepath))
+
+    # Clean up empty directories in test output areas
+    for dir_path in _cleanup_directory_patterns(rocprof_config.build_dir):
+        if dir_path.exists():
+            # First pass: remove empty subdirectories
+            for child in list(dir_path.iterdir()):
+                _safe_remove_directory(child, remove_if_empty=True)
+            # Second pass: remove parent if now empty
+            _safe_remove_directory(dir_path, remove_if_empty=True)
+
+
+@pytest.fixture(scope="module", autouse=True)
+def cleanup_module_temp_files(rocprof_config: RocprofsysConfig, request: pytest.FixtureRequest):
+    """Module-scoped cleanup that runs AFTER each test module completes.
+
+    Execution Order:
+        1. Module starts
+        2. All tests in module run (with their validations)
+        3. Module ends
+        4. This cleanup runs (after yield)
+
+    Cleans up instrumented binaries and intermediate files created during module tests.
+    This does NOT interfere with individual test validations.
+    """
+    yield  # All tests in module run here
+
+    if os.environ.get("ROCPROFSYS_KEEP_TEST_OUTPUT", "0") == "1":
+        return
+
+    import glob
+
+    # Get module name for targeted cleanup
+    module_name = request.module.__name__ if hasattr(request, "module") else ""
+
+    # Clean up instrumented binaries in build directory
+    for pattern in ["*.inst", "*.inst.orig"]:
+        for filepath in glob.glob(str(rocprof_config.build_dir / pattern)):
+            _safe_remove_file(Path(filepath))
+
+    # Clean up any temp files in /tmp that match session patterns
     temp_patterns = [
         "/tmp/buffered_storage*.bin",
         "/tmp/metadata*.json",
     ]
-
     for pattern in temp_patterns:
         for filepath in glob.glob(pattern):
-            try:
-                Path(filepath).unlink()
-            except OSError:
-                pass
+            _safe_remove_file(Path(filepath))
 
-    output_base = rocprof_config.build_dir / "rocprof-sys-pytest-output"
-    if output_base.exists():
-        for child in output_base.iterdir():
-            if child.is_dir() and not any(child.iterdir()):
-                try:
-                    child.rmdir()
-                except OSError:
-                    pass
+
+@pytest.fixture
+def cleanup_instrumented_binary(
+    rocprof_config: RocprofsysConfig,
+    test_output_dir: Path,
+) -> Generator[None, None, None]:
+    """Function-scoped cleanup for instrumented binaries.
+
+    Use this fixture in tests that create instrumented binaries to ensure
+    they are cleaned up after the test completes.
+    """
+    # Track files before test
+    pre_existing = set(test_output_dir.glob("*.inst")) if test_output_dir.exists() else set()
+
+    yield
+
+    if os.environ.get("ROCPROFSYS_KEEP_TEST_OUTPUT", "0") == "1":
+        return
+
+    # Clean up any new .inst files
+    if test_output_dir.exists():
+        for inst_file in test_output_dir.glob("*.inst"):
+            if inst_file not in pre_existing:
+                _safe_remove_file(inst_file)
+
+    # Also clean from build directory
+    for inst_file in rocprof_config.build_dir.glob("*.inst"):
+        _safe_remove_file(inst_file)
 
 
 # ============================================================================

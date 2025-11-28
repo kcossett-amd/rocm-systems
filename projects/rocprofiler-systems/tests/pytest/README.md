@@ -24,7 +24,14 @@ tests/pytest/
 │   ├── gpu.py              # GPU detection utilities
 │   ├── runners.py          # Test execution runners
 │   └── validators.py       # Wrappers for existing validation scripts
-├── test_transpose.py       # Transpose example tests
+├── test_binary.py          # CLI tool tests (instrument, avail, run)
+├── test_causal.py          # Causal profiling tests
+├── test_fork.py            # Fork-related tests
+├── test_mpi.py             # MPI integration tests
+├── test_openmp.py          # OpenMP tests (cg, lu, target)
+├── test_python.py          # Python integration tests
+├── test_transpose.py       # Transpose example tests (GPU)
+├── test_user_api.py        # User API tests
 └── README.md               # This file
 ```
 
@@ -96,18 +103,40 @@ pytest
 
 ## Cleanup Behavior
 
-The framework includes automatic cleanup:
+The framework includes comprehensive automatic cleanup at multiple levels:
 
-- **Per-test cleanup**: Output directories are cleaned up after each passing test
-- **Session cleanup**: Temporary files (`/tmp/buffered_storage*.bin`, `/tmp/metadata*.json`)
-  are cleaned up after all tests complete
-- **Failed test preservation**: Output directories from failed tests are preserved for debugging
+### Per-Test Cleanup
+- Output directories are cleaned up after each passing test
+- Instrumented binaries (`.inst` files) are cleaned up automatically
+- Failed test outputs are preserved for debugging
+
+### Module-Level Cleanup
+- Instrumented binaries in the build directory are cleaned up after each test module
+- Intermediate temp files are cleaned between modules
+
+### Session-Level Cleanup
+After all tests complete, the following are cleaned up:
+- Temporary buffered storage files (`/tmp/buffered_storage*.bin`)
+- Temporary metadata files (`/tmp/metadata*.json`)
+- Perfetto temp files (`/tmp/perfetto-*.proto`)
+- HSA/ROCm temp files (`/tmp/hsa-*.tmp`, `/tmp/rocm-*.tmp`, `/tmp/hip-*.tmp`)
+- Instrumented binaries (`/tmp/*.inst`)
+- Causal profiling temp files (`/tmp/causal-*.json`, `/tmp/experiments-*.coz`)
+- Empty output directories
+
+### Controlling Cleanup
 
 To keep all test outputs (even from passing tests):
 
 ```bash
 export ROCPROFSYS_KEEP_TEST_OUTPUT=1
 ```
+
+### Cleanup Methods in Test Results
+
+All test result classes (`TestResult`, `CausalResult`, `PythonResult`) include:
+- `cleanup()`: Clean up all output files (respects `keep_on_failure` flag)
+- `cleanup_instrumented_binaries()`: Clean up only instrumented binary files
 
 ### Running Tests by Marker
 
@@ -233,6 +262,19 @@ class TestMyFeature:
 - `BinaryRewriteRunner`: Binary rewrite + run
 - `RuntimeInstrumentRunner`: Runtime instrumentation
 - `SysRunRunner`: Run with rocprof-sys-run wrapper
+
+## Test Modules
+
+| Module | Description | Markers |
+|--------|-------------|---------|
+| `test_binary.py` | CLI tool tests (instrument, avail, run) | - |
+| `test_causal.py` | Causal profiling tests | `slow` |
+| `test_fork.py` | Fork-related tests | `gpu` |
+| `test_mpi.py` | MPI integration tests | `mpi` |
+| `test_openmp.py` | OpenMP tests (cg, lu, target) | `gpu`, `rocpd` |
+| `test_python.py` | Python integration tests | `rocpd` |
+| `test_transpose.py` | Transpose example tests | `gpu`, `rocpd`, `rocprofiler`, `loops` |
+| `test_user_api.py` | User API tests | `loops` |
 
 ### Available Validators
 
