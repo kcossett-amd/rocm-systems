@@ -142,8 +142,12 @@ function(rocprofiler_systems_causal_example_executable _NAME)
     endif()
 
     if(ROCPROFSYS_INSTALL_EXAMPLES)
+        set(_INSTALL_TARGETS ${_NAME} ${_NAME}-rocprofsys)
+        if(coz-profiler_FOUND)
+            list(APPEND _INSTALL_TARGETS ${_NAME}-coz)
+        endif()
         install(
-            TARGETS ${_NAME} ${_NAME}-rocprofsys ${_NAME}-coz
+            TARGETS ${_INSTALL_TARGETS}
             DESTINATION bin
             COMPONENT rocprofiler-systems-examples
             OPTIONAL

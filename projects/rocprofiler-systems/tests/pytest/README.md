@@ -18,13 +18,21 @@ The pytest framework provides a more maintainable, debuggable, and readable alte
 tests/pytest/
 ├── conftest.py              # Shared fixtures and pytest configuration
 ├── requirements.txt         # Python dependencies
+├── build_standalone.sh      # Script to build portable test packages
 ├── rocprofsys/             # Test utilities package
 │   ├── __init__.py
 │   ├── config.py           # Configuration management
 │   ├── gpu.py              # GPU detection utilities
 │   ├── runners.py          # Test execution runners
 │   └── validators.py       # Wrappers for existing validation scripts
-├── test_transpose.py       # Transpose example tests
+├── test_binary.py          # CLI tool tests (instrument, avail, run)
+├── test_causal.py          # Causal profiling tests
+├── test_fork.py            # Fork-related tests
+├── test_mpi.py             # MPI integration tests
+├── test_openmp.py          # OpenMP tests (cg, lu, target)
+├── test_python.py          # Python integration tests
+├── test_transpose.py       # Transpose example tests (GPU)
+├── test_user_api.py        # User API tests
 └── README.md               # This file
 ```
 
@@ -80,12 +88,36 @@ pytest tests/pytest/test_transpose.py::TestTranspose::test_sampling
 
 ### Configuration
 
+The test framework supports two modes: **build directory** and **installed binaries**.
+
+#### Build Directory Mode (default)
+
 Set the build directory (if not auto-detected):
 
 ```bash
 export ROCPROFSYS_BUILD_DIR=/path/to/build/debug
 pytest
 ```
+
+#### Installed Binaries Mode
+
+Run tests against installed rocprofiler-systems (e.g., from ROCm):
+
+```bash
+# Option 1: Set installation prefix
+export ROCPROFSYS_INSTALL_DIR=/opt/rocm
+pytest
+
+# Option 2: If rocprof-sys-instrument is in PATH, it will be auto-detected
+pytest
+
+# For validation rules, also set source directory:
+export ROCPROFSYS_SOURCE_DIR=/path/to/rocprofiler-systems
+export ROCPROFSYS_INSTALL_DIR=/opt/rocm
+pytest
+```
+
+#### Other Options
 
 Keep test output directories for debugging:
 
@@ -94,20 +126,124 @@ export ROCPROFSYS_KEEP_TEST_OUTPUT=1
 pytest
 ```
 
+## Standalone Test Packages
+
+The test suite can be packaged into a standalone executable for running on remote machines
+where rocprofiler-systems is installed but the source code is not available.
+
+### Building Standalone Packages
+
+Use the `build_standalone.sh` script to create portable test packages:
+
+```bash
+cd tests/pytest
+
+# Build a Python zipapp (recommended - most portable)
+./build_standalone.sh --shiv
+
+# Build a PyInstaller binary (no Python needed on target)
+./build_standalone.sh --pyinstaller
+
+# Build PyInstaller binary in Docker (for glibc compatibility)
+./build_standalone.sh --pyinstaller-docker
+
+# Build both zipapp and PyInstaller
+./build_standalone.sh --all
+
+# See all options
+./build_standalone.sh --help
+```
+
+### Package Types
+
+| Package | Size | Python on Target | glibc Compatibility |
+|---------|------|------------------|---------------------|
+| Zipapp (`.pyz`) | ~72KB | Required + pytest | Any (uses system Python) |
+| PyInstaller | ~50-100MB | Not needed | Matches build machine |
+| PyInstaller+Docker | ~50-100MB | Not needed | glibc 2.17+ (RHEL 7+) |
+
+**Recommendation**: Use the **zipapp** (`.pyz`) for maximum portability. It uses the target
+system's Python interpreter, avoiding glibc version mismatch issues.
+
+### Running on Target Machine
+
+**Zipapp** (requires `pip install pytest` on target):
+
+```bash
+# Copy to target
+scp dist/rocprofsys-tests.pyz target-machine:/path/to/
+
+# On target machine
+pip install pytest
+export ROCPROFSYS_INSTALL_DIR=/opt/rocm  # if not in PATH
+python3 rocprofsys-tests.pyz --collect-only   # List available tests
+python3 rocprofsys-tests.pyz -v               # Run all tests
+python3 rocprofsys-tests.pyz -k transpose -v  # Run specific tests
+python3 rocprofsys-tests.pyz -x               # Stop on first failure
+```
+
+**PyInstaller binary** (no Python needed):
+
+```bash
+# Copy to target
+scp dist/rocprofsys-tests target-machine:/path/to/
+
+# On target machine
+export ROCPROFSYS_INSTALL_DIR=/opt/rocm
+./rocprofsys-tests --collect-only
+./rocprofsys-tests -v
+```
+
+### Troubleshooting
+
+**glibc version error** (PyInstaller only):
+```
+GLIBC_2.38 not found
+```
+Solution: Use `--pyinstaller-docker` to build with manylinux, or use `--shiv` instead.
+
+**pytest not found** (Zipapp only):
+```
+ERROR: pytest is not installed
+```
+Solution: `pip install pytest` on the target machine.
+
 ## Cleanup Behavior
 
-The framework includes automatic cleanup:
+The framework includes comprehensive automatic cleanup at multiple levels:
 
-- **Per-test cleanup**: Output directories are cleaned up after each passing test
-- **Session cleanup**: Temporary files (`/tmp/buffered_storage*.bin`, `/tmp/metadata*.json`)
-  are cleaned up after all tests complete
-- **Failed test preservation**: Output directories from failed tests are preserved for debugging
+### Per-Test Cleanup
+- Output directories are cleaned up after each passing test
+- Instrumented binaries (`.inst` files) are cleaned up automatically
+- Failed test outputs are preserved for debugging
+
+### Module-Level Cleanup
+- Instrumented binaries in the build directory are cleaned up after each test module
+- Intermediate temp files are cleaned between modules
+
+### Session-Level Cleanup
+After all tests complete, the following are cleaned up:
+- Temporary buffered storage files (`/tmp/buffered_storage*.bin`)
+- Temporary metadata files (`/tmp/metadata*.json`)
+- Perfetto temp files (`/tmp/perfetto-*.proto`)
+- HSA/ROCm temp files (`/tmp/hsa-*.tmp`, `/tmp/rocm-*.tmp`, `/tmp/hip-*.tmp`)
+- Instrumented binaries (`/tmp/*.inst`)
+- Causal profiling temp files (`/tmp/causal-*.json`, `/tmp/experiments-*.coz`)
+- Empty output directories
+
+### Controlling Cleanup
 
 To keep all test outputs (even from passing tests):
 
 ```bash
 export ROCPROFSYS_KEEP_TEST_OUTPUT=1
 ```
+
+### Cleanup Methods in Test Results
+
+All test result classes (`TestResult`, `CausalResult`, `PythonResult`) include:
+- `cleanup()`: Clean up all output files (respects `keep_on_failure` flag)
+- `cleanup_instrumented_binaries()`: Clean up only instrumented binary files
 
 ### Running Tests by Marker
 
@@ -233,6 +369,19 @@ class TestMyFeature:
 - `BinaryRewriteRunner`: Binary rewrite + run
 - `RuntimeInstrumentRunner`: Runtime instrumentation
 - `SysRunRunner`: Run with rocprof-sys-run wrapper
+
+## Test Modules
+
+| Module | Description | Markers |
+|--------|-------------|---------|
+| `test_binary.py` | CLI tool tests (instrument, avail, run) | - |
+| `test_causal.py` | Causal profiling tests | `slow` |
+| `test_fork.py` | Fork-related tests | `gpu` |
+| `test_mpi.py` | MPI integration tests | `mpi` |
+| `test_openmp.py` | OpenMP tests (cg, lu, target) | `gpu`, `rocpd` |
+| `test_python.py` | Python integration tests | `rocpd` |
+| `test_transpose.py` | Transpose example tests | `gpu`, `rocpd`, `rocprofiler`, `loops` |
+| `test_user_api.py` | User API tests | `loops` |
 
 ### Available Validators
 
