@@ -33,6 +33,7 @@ This ensures consistency between pytest and CMake/CTest validation.
 
 from __future__ import annotations
 
+import re
 import subprocess
 import sys
 from dataclasses import dataclass
@@ -321,3 +322,44 @@ def validate_causal_json(
         args.extend(additional_args)
 
     return _run_validation_script("validate-causal-json.py", args, timeout)
+
+
+# ============================================================================
+# Regex Pattern Validation
+# ============================================================================
+
+
+def validate_regex_patterns(
+    content: str,
+    patterns: list[str],
+) -> ValidationResult:
+    """Check if all regex patterns are found in the content.
+
+    Args:
+        content: String content to search (e.g., file contents, stdout, stderr)
+        patterns: List of regex patterns that must all be found
+
+    Returns:
+        ValidationResult indicating whether all patterns were found
+
+    """
+    if not patterns:
+        return ValidationResult(True, "No patterns to validate")
+    
+    missing_patterns = []
+    for pattern in patterns:
+        if not re.search(pattern, content):
+            missing_patterns.append(pattern)
+    
+    if missing_patterns:
+        return ValidationResult(
+            valid=False,
+            message=f"Missing {len(missing_patterns)} pattern(s): {', '.join(missing_patterns)}",
+        )
+    
+    return ValidationResult(
+        valid=True,
+        message=f"All {len(patterns)} pattern(s) found",
+    )
+
+

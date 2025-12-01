@@ -42,10 +42,14 @@ import pytest
 from rocprofsys import (
     RocprofsysConfig,
     GPUInfo,
+    BaselineRunner,
     BinaryRewriteRunner,
     SamplingRunner,
+    SysRunRunner,
     validate_perfetto_trace,
     validate_rocpd_database,
+    validate_timemory_json,
+    validate_regex_patterns,
 )
 
 
@@ -291,6 +295,276 @@ class TestOpenMPTarget:
         # This validation is informational - kernels may have different names
         if not validation.valid:
             pytest.skip("Kernel names differ from expected")
+
+
+# ============================================================================
+# Test Class: OpenMP-VV Host Tests
+# ============================================================================
+
+@pytest.mark.parametrize(
+    "target_name",
+    [
+        "openmp-vv-host-test-parallel-for-simd-atomic",
+        "openmp-vv-host-test-team-default-shared",
+    ],
+    ids=["parallel-for-simd-atomic", "team-default-shared"],
+)
+class TestOpenMPVVHost:
+    """Tests for OpenMP VV host programs."""
+
+    def test_ompvv_host_sampling(
+        self,
+        rocprof_config: RocprofsysConfig,
+        test_output_dir: Path,
+        ompt_env: dict[str, str],
+        target_name: str,
+    ):
+        """Test OpenMP VV host programs with sampling."""
+        env = ompt_env.copy()
+        
+        try:
+            runner = SamplingRunner(
+                config=rocprof_config,
+                target=target_name,
+                output_dir=test_output_dir,
+                env=env,
+                timeout=180,
+            )
+        except FileNotFoundError:
+            pytest.skip(f"{target_name} not built")
+        
+        result = runner.run()
+        assert result.success, f"OMPVV host test {target_name} failed: {result.stderr}"
+        
+        # Verify output files were created
+        assert result.perfetto_file is not None or \
+               len(list(result.output_dir.glob("*.json"))) > 0, \
+               "No output files created"
+    
+    def test_ompvv_host_baseline(
+        self,
+        rocprof_config: RocprofsysConfig,
+        test_output_dir: Path,
+        ompt_env: dict[str, str],
+        target_name: str,
+    ):
+        """Test OpenMP VV host programs with baseline (no instrumentation)."""
+        try:
+            runner = BaselineRunner(
+                config=rocprof_config,
+                target=target_name,
+                output_dir=test_output_dir,
+                env=ompt_env,
+                timeout=180,
+            )
+        except FileNotFoundError:
+            pytest.skip(f"{target_name} not built")
+        
+        result = runner.run()
+        assert result.success, f"OMPVV host baseline {target_name} failed: {result.stderr}"
+    
+    def test_ompvv_host_binary_rewrite(
+        self,
+        rocprof_config: RocprofsysConfig,
+        test_output_dir: Path,
+        ompt_env: dict[str, str],
+        target_name: str,
+    ):
+        """Test OpenMP VV host programs with binary rewrite."""
+        env = ompt_env.copy()
+        env["ROCPROFSYS_COUT_OUTPUT"] = "ON"
+        
+        try:
+            runner = BinaryRewriteRunner(
+                config=rocprof_config,
+                target=target_name,
+                output_dir=test_output_dir,
+                rewrite_args=["-e", "-v", "2", "--instrument-loops"],
+                env=env,
+                timeout=180,
+            )
+        except FileNotFoundError:
+            pytest.skip(f"{target_name} not built")
+        
+        # Perform rewrite phase
+        rewrite_result = runner.rewrite()
+        
+        assert rewrite_result.success, f"Rewrite failed for {target_name}: {rewrite_result.stderr}"
+        
+        # Run the instrumented binary
+        result = runner.run()
+        
+        assert result.success, f"OMPVV host binary rewrite {target_name} failed: {result.stderr}"
+
+        # Validate timemory output contains OpenMP functions
+        pattern_validation = validate_regex_patterns(
+            content=result.stdout,
+            patterns=[r"omp_parallel"],
+        )
+        assert pattern_validation.valid, f"OpenMP pattern validation failed for {target_name}: {pattern_validation.message}"
+    
+    def test_ompvv_host_run(
+        self,
+        rocprof_config: RocprofsysConfig,
+        test_output_dir: Path,
+        ompt_env: dict[str, str],
+        target_name: str,
+    ):
+        """Test OpenMP VV host programs with rocprof-sys-run wrapper."""
+        env = ompt_env.copy()
+        
+        try:
+            runner = SysRunRunner(
+                config=rocprof_config,
+                target=target_name,
+                output_dir=test_output_dir,
+                env=env,
+                timeout=180,
+            )
+        except FileNotFoundError:
+            pytest.skip(f"{target_name} not built")
+        
+        result = runner.run()
+        assert result.success, f"OMPVV host run {target_name} failed: {result.stderr}"
+        
+        # Verify output files were created
+        assert result.perfetto_file is not None or \
+               len(list(result.output_dir.glob("*.json"))) > 0, \
+               "No output files created"
+
+
+# ============================================================================
+# Test Class: OpenMP-VV Offload Tests
+# ============================================================================
+
+@pytest.mark.gpu
+@pytest.mark.parametrize(
+    "target_name",
+    [
+        "openmp-vv-offload-test-target-simd-if",
+        "openmp-vv-offload-test-target-teams-distribute-parallel-for-collapse",
+    ],
+    ids=["target-simd-if", "target-teams-distribute-parallel-for-collapse"],
+)
+class TestOpenMPVVOffload:
+    """Tests for OpenMP VV offload programs."""
+
+    def test_ompvv_offload_baseline(
+        self,
+        rocprof_config: RocprofsysConfig,
+        test_output_dir: Path,
+        openmp_target_env: dict[str, str],
+        target_name: str,
+    ):
+        """Test OpenMP VV offload programs with baseline."""
+        try:
+            runner = BaselineRunner(
+                config=rocprof_config,
+                target=target_name,
+                output_dir=test_output_dir,
+                env=openmp_target_env,
+                timeout=300,
+            )
+        except FileNotFoundError:
+            pytest.skip(f"{target_name} not built")
+        
+        result = runner.run()
+        assert result.success, f"OMPVV offload baseline {target_name} failed: {result.stderr}"
+
+    def test_ompvv_offload_sampling(
+        self,
+        rocprof_config: RocprofsysConfig,
+        test_output_dir: Path,
+        openmp_target_env: dict[str, str],
+        target_name: str,
+    ):
+        """Test OpenMP VV offload programs with sampling."""
+        try:
+            runner = SamplingRunner(
+                config=rocprof_config,
+                target=target_name,
+                output_dir=test_output_dir,
+                env=openmp_target_env,
+                timeout=300,
+            )
+        except FileNotFoundError:
+            pytest.skip(f"{target_name} not built")
+        
+        result = runner.run()
+        assert result.success, f"OMPVV offload sampling {target_name} failed: {result.stderr}"
+
+    def test_ompvv_offload_binary_rewrite(
+        self,
+        rocprof_config: RocprofsysConfig,
+        test_output_dir: Path,
+        openmp_target_env: dict[str, str],
+        target_name: str,
+    ):
+        """Test OpenMP VV offload programs with binary rewrite."""
+        env = openmp_target_env.copy()
+        env["ROCPROFSYS_COUT_OUTPUT"] = "ON"
+        
+        try:
+            runner = BinaryRewriteRunner(
+                config=rocprof_config,
+                target=target_name,
+                output_dir=test_output_dir,
+                rewrite_args=["-e", "-v", "2"],
+                env=env,
+                timeout=300,
+            )
+        except FileNotFoundError:
+            pytest.skip(f"{target_name} not built")
+        
+        # Perform rewrite phase
+        rewrite_result = runner.rewrite()
+        
+        assert rewrite_result.success, f"Rewrite failed for {target_name}: {rewrite_result.stderr}"
+        
+        # Run the instrumented binary
+        result = runner.run()
+        
+        assert result.success, f"OMPVV offload binary rewrite {target_name} failed: {result.stderr}"
+        print(result.stdout)
+        # Validate timemory output contains OpenMP offloading functions
+        pattern_validation = validate_regex_patterns(
+            content=result.stdout,
+            patterns=[r"omp_offloading"],
+        )
+        assert pattern_validation.valid, f"Offloading pattern validation failed for {target_name}: {pattern_validation.message}"
+
+    def test_ompvv_offload_run(
+        self,
+        rocprof_config: RocprofsysConfig,
+        test_output_dir: Path,
+        openmp_target_env: dict[str, str],
+        target_name: str,
+    ):
+        """Test OpenMP VV offload programs with run mode."""
+        env = openmp_target_env.copy()
+        env.update({
+            "ROCPROFSYS_USE_OMPT": "OFF",
+        })
+        
+        try:
+            runner = SysRunRunner(
+                config=rocprof_config,
+                target=target_name,
+                output_dir=test_output_dir,
+                run_args=["-e", "-v", "1", "--label", "return", "args"],
+                env=env,
+                timeout=300,
+            )
+        except FileNotFoundError:
+            pytest.skip(f"{target_name} not built")
+        
+        result = runner.run()
+        assert result.success, f"OMPVV offload run {target_name} failed: {result.stderr}"
+        
+        # Verify output files were created
+        assert result.perfetto_file is not None or \
+               len(list(result.output_dir.glob("*.json"))) > 0, \
+               "No output files created"
 
 
 # ============================================================================

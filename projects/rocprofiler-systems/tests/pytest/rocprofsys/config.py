@@ -168,6 +168,7 @@ class RocprofsysConfig:
             "ROCPROFSYS_USE_PROCESS_SAMPLING": "ON",
             "ROCPROFSYS_TIME_OUTPUT": "OFF",
             "ROCPROFSYS_FILE_OUTPUT": "ON",
+            "ROCPROFSYS_USE_PID": "OFF",
             "ROCPROFSYS_VERBOSE": "1",
             "ROCPROFSYS_SAMPLING_FREQ": "300",
             "ROCPROFSYS_SAMPLING_DELAY": "0.05",
@@ -369,9 +370,11 @@ def discover_build_config(
         else:
             test_dir = Path(__file__).parent.parent.parent.parent
             for candidate in [
+                test_dir / "rocprof-sys-build",
                 test_dir / "build" / "debug",
                 test_dir / "build" / "release",
                 test_dir / "build",
+                Path.cwd() / "rocprof-sys-build",
                 Path.cwd() / "build" / "debug",
                 Path.cwd() / "build" / "release",
                 Path.cwd() / "build",
