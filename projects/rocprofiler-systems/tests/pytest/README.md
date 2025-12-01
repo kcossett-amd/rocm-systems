@@ -18,6 +18,7 @@ The pytest framework provides a more maintainable, debuggable, and readable alte
 tests/pytest/
 ├── conftest.py              # Shared fixtures and pytest configuration
 ├── requirements.txt         # Python dependencies
+├── build_standalone.sh      # Script to build portable test packages
 ├── rocprofsys/             # Test utilities package
 │   ├── __init__.py
 │   ├── config.py           # Configuration management
@@ -87,6 +88,10 @@ pytest tests/pytest/test_transpose.py::TestTranspose::test_sampling
 
 ### Configuration
 
+The test framework supports two modes: **build directory** and **installed binaries**.
+
+#### Build Directory Mode (default)
+
 Set the build directory (if not auto-detected):
 
 ```bash
@@ -94,12 +99,114 @@ export ROCPROFSYS_BUILD_DIR=/path/to/build/debug
 pytest
 ```
 
+#### Installed Binaries Mode
+
+Run tests against installed rocprofiler-systems (e.g., from ROCm):
+
+```bash
+# Option 1: Set installation prefix
+export ROCPROFSYS_INSTALL_DIR=/opt/rocm
+pytest
+
+# Option 2: If rocprof-sys-instrument is in PATH, it will be auto-detected
+pytest
+
+# For validation rules, also set source directory:
+export ROCPROFSYS_SOURCE_DIR=/path/to/rocprofiler-systems
+export ROCPROFSYS_INSTALL_DIR=/opt/rocm
+pytest
+```
+
+#### Other Options
+
 Keep test output directories for debugging:
 
 ```bash
 export ROCPROFSYS_KEEP_TEST_OUTPUT=1
 pytest
 ```
+
+## Standalone Test Packages
+
+The test suite can be packaged into a standalone executable for running on remote machines
+where rocprofiler-systems is installed but the source code is not available.
+
+### Building Standalone Packages
+
+Use the `build_standalone.sh` script to create portable test packages:
+
+```bash
+cd tests/pytest
+
+# Build a Python zipapp (recommended - most portable)
+./build_standalone.sh --shiv
+
+# Build a PyInstaller binary (no Python needed on target)
+./build_standalone.sh --pyinstaller
+
+# Build PyInstaller binary in Docker (for glibc compatibility)
+./build_standalone.sh --pyinstaller-docker
+
+# Build both zipapp and PyInstaller
+./build_standalone.sh --all
+
+# See all options
+./build_standalone.sh --help
+```
+
+### Package Types
+
+| Package | Size | Python on Target | glibc Compatibility |
+|---------|------|------------------|---------------------|
+| Zipapp (`.pyz`) | ~72KB | Required + pytest | Any (uses system Python) |
+| PyInstaller | ~50-100MB | Not needed | Matches build machine |
+| PyInstaller+Docker | ~50-100MB | Not needed | glibc 2.17+ (RHEL 7+) |
+
+**Recommendation**: Use the **zipapp** (`.pyz`) for maximum portability. It uses the target
+system's Python interpreter, avoiding glibc version mismatch issues.
+
+### Running on Target Machine
+
+**Zipapp** (requires `pip install pytest` on target):
+
+```bash
+# Copy to target
+scp dist/rocprofsys-tests.pyz target-machine:/path/to/
+
+# On target machine
+pip install pytest
+export ROCPROFSYS_INSTALL_DIR=/opt/rocm  # if not in PATH
+python3 rocprofsys-tests.pyz --collect-only   # List available tests
+python3 rocprofsys-tests.pyz -v               # Run all tests
+python3 rocprofsys-tests.pyz -k transpose -v  # Run specific tests
+python3 rocprofsys-tests.pyz -x               # Stop on first failure
+```
+
+**PyInstaller binary** (no Python needed):
+
+```bash
+# Copy to target
+scp dist/rocprofsys-tests target-machine:/path/to/
+
+# On target machine
+export ROCPROFSYS_INSTALL_DIR=/opt/rocm
+./rocprofsys-tests --collect-only
+./rocprofsys-tests -v
+```
+
+### Troubleshooting
+
+**glibc version error** (PyInstaller only):
+```
+GLIBC_2.38 not found
+```
+Solution: Use `--pyinstaller-docker` to build with manylinux, or use `--shiv` instead.
+
+**pytest not found** (Zipapp only):
+```
+ERROR: pytest is not installed
+```
+Solution: `pip install pytest` on the target machine.
 
 ## Cleanup Behavior
 

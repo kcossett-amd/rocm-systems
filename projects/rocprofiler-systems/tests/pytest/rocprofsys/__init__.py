@@ -30,7 +30,7 @@ Provides reusable components for testing rocprofiler-systems:
 - GPU and system detection utilities
 """
 
-from .config import RocprofsysConfig, discover_build_config
+from .config import RocprofsysConfig, discover_build_config, discover_install_config
 from .runners import (
     TestResult,
     BaselineRunner,
@@ -53,6 +53,7 @@ __all__ = [
     # Config
     "RocprofsysConfig",
     "discover_build_config",
+    "discover_install_config",
     # Runners
     "TestResult",
     "BaselineRunner",
